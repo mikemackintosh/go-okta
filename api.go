@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"time"
 )
 
 // Client to access okta
@@ -22,6 +23,25 @@ type errorResponse struct {
 	HTTPCode int
 	Response ErrorResponse
 	Endpoint string
+}
+
+type OTPResponse struct {
+	ExpiresAt  time.Time `json:"expiresAt"`
+	Status     string    `json:"status"`
+	RelayState string    `json:"relayState"`
+	Embedded   struct {
+		User struct {
+			ID              string    `json:"id"`
+			PasswordChanged time.Time `json:"passwordChanged"`
+			Profile         struct {
+				Login     string `json:"login"`
+				FirstName string `json:"firstName"`
+				LastName  string `json:"lastName"`
+				Locale    string `json:"locale"`
+				TimeZone  string `json:"timeZone"`
+			} `json:"profile"`
+		} `json:"user"`
+	} `json:"_embedded"`
 }
 
 func (e *errorResponse) Error() string {
@@ -49,6 +69,47 @@ func (c *Client) Authenticate(username, password string) (*AuthnResponse, error)
 	var response = &AuthnResponse{}
 	err := c.call("authn", "POST", request, response)
 	return response, err
+}
+
+// VerifyOTP will validate the supplied TOTP code
+func (r *AuthnResponse) VerifyOTP(otp string, verifyResponse *OTPResponse) error {
+	request := map[string]string{"passCode": otp, "stateToken": r.StateToken}
+	data, _ := json.Marshal(request)
+	req, err := http.NewRequest("POST", r.Embedded.Factors[0].Links.Verify.Href, bytes.NewBuffer(data))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req.Header.Add("Accept", `application/json`)
+	req.Header.Add("Content-Type", `application/json`)
+
+	client := http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		err := json.Unmarshal(body, verifyResponse)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		var errors ErrorResponse
+		_ = json.Unmarshal(body, &errors)
+		return &errorResponse{
+			HTTPCode: resp.StatusCode,
+			Response: errors,
+		}
+	}
+
+	return nil
 }
 
 // Session takes a session token and always fails
